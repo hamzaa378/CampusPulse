@@ -1,68 +1,70 @@
-# Architecture, database design and reliability decisions
+# Architecture — CampusPulse V2
 
 ## Data path
 
+```text
+    real sensors / simulator / CLI load-test
+                       |
+             API key or organizer token
+                       |
+                 Django + DRF
+                       |
+            V2 fast input validator
+                       |
+           unique eventId + sensor map
+                       |
+    existing event signature projections (MySQL)
+                       |
+      atomic native MySQL batch insert / no-op for retries
+                       |
+              MySQL monitor_reading
+       (processed_at IS NULL is durable queue)
+                       |
+               SINGLE rule worker
+          |                            |
+   instant comparison          rolling deque + UTC bucket
+          |                            |
+          +------ monitor_alert -------+
+                         |
+              MySQL insert/update triggers
+                         |
+                 monitor_alert_audit
+                         |
+              Django management API
+                         |
+            Streamlit organizer dashboard
+       + Performance Lab / imported JSON reports
 ```
-Sensor simulator / HTTP client
-       |   X-Sensor-Key
-       v
-Django API -> serializer -> sensor authorization -> deduplication -> MySQL monitor_reading
-                                                                  |
-                                                   Pending: processed_at IS NULL
-                                                                  |
-                                             run_alert_worker (separate process)
-                                                                  |
-                                           instant / rolling average evaluation
-                                                                  |
-                                            MySQL monitor_alert (+ audit trigger)
-                                                                  |
-                                         Django staff REST API -> Streamlit UI
-```
 
-All payload processing happens after a database transaction commits. A worker crash before commit rolls back both alerts and progress, allowing restart to safely retry readings. Unique event IDs and unique dedupe keys prevent duplicate records and repeated alerts on retries. SQLite tests use Python audit writes when native MySQL triggers are not present. MySQL deployment must install stored routines and triggers after migrations.
+## Storage and SQL constraints
 
-## Domain tables
+Django migration `monitor/0001_initial.py` owns schema creation. The SQL mirror `mysql/01_schema_mysql.sql` is for reviewers/fresh-install documentation, **not** a second migration to run against a populated database. V2 has no schema changes. MySQL programmable objects remain **4 triggers, 4 procedures (1 cursor), 2 functions, 4 views**. SQL `05_v2_readonly_health.sql` shows non-destructive verification queries.
 
-1. **monitor_sensor**: identity, location, active flag.
-2. **monitor_rule**: sensor/metric scope, comparison, instant vs window, severity, enabled.
-3. **monitor_reading**: durable sensor data and worker progress, unique event ID.
-4. **monitor_alert**: triggered incident, rule snapshot, lifecycle, unique alert key.
-5. **monitor_alert_audit**: append-only open/acknowledge/resolve transitions.
-6. **monitor_daily_summary**: offline cursor-procedure-derived daily aggregates.
+- Unique `monitor_reading.event_id`: idempotency
+- Index `(processed_at, recorded_at, id)`: queued worker selection
+- Index `(sensor_id, metric_type, recorded_at)`: rolling-window history
+- Unique alert `dedupe_key`: avoid repeated alert creation
+- Alert status audit triggers: create and transition history
+- Daily summary cursor procedure: aggregate a date across active sensors
 
-Django's `auth_user`, `authtoken_token`, etc. are created by its built-in migrations. MySQL uses InnoDB transactions and UTC timestamps. Foreign keys enforce link integrity. Queue index `(processed_at, recorded_at, id)` supports selection of unprocessed records. Time-series index `(sensor_id, metric_type, recorded_at)` supports window history. Unique constraints enforce ingestion and alert idempotency.
+## Reliability contracts
 
-## SQL programming objects
+1. Invalid or partially invalid batches are rejected before any rows are inserted.
+2. Sensor keys cannot administer rules or alerts; staff token required.
+3. The API returns 202 after a database transaction commits, before the worker handles alerts.
+4. Retries with the same event identity/payload are no-op; differing existing payloads are rejected.
+5. On MySQL, two requests racing on an event ID use conditional `ON DUPLICATE KEY UPDATE`; a conflicting concurrent payload causes a non-null constraint failure and full transaction rollback. Matching payloads no-op.
+6. A worker crash can leave rows pending, recoverable by restarting the worker; database commits for alerts and `processed_at` occur in one transaction.
+7. Alert worker is intentionally one process in V2 for predictable time-window order. `SELECT FOR UPDATE SKIP LOCKED` is present, but that by itself does not make parallel-window aggregation order-safe.
+8. The `legacy` ingestion switch is an operational rollback path; it does not drop or alter tables.
 
-- **Functions**: `fn_rule_matches` (pure operator comparison), `fn_alert_priority` (severity/status order).
-- **Triggers**: `trg_rule_validate_insert`, `trg_rule_validate_update`, `trg_alert_open_audit`, `trg_alert_state_audit`.
-- **Procedures**: `sp_acknowledge_alert`, `sp_resolve_alert` (transactional), `sp_sensor_alert_counts`, `sp_refresh_daily_summary` (CURSOR loop over sensors).
-- **Views**: `vw_sensor_latest`, `vw_alert_overview`, `vw_rule_health`, `vw_sensor_daily_summary`.
+## Optimization trade-offs
 
-Django owns request/state transitions so serializer permissions and API errors stay consistent. Database procedures also permit direct SQL demonstrations; both paths write to the same tables and fire the same audit triggers. Rule comparison in Python mirrors `fn_rule_matches` to avoid SQL calls per incoming sample.
+- Faster specialized validation is less general than DRF field validation. Regression tests validate supported metrics, ISO datetimes, numeric precision and failure cases. Unexpected new fields or future serializer rules must also be added to the fast validator.
+- Native `executemany()` decreases Python object overhead but couples fast path to MySQL. SQLite always uses ORM `bulk_create` for portable tests.
+- The system uses the same indexed MySQL table as a durable processing queue: simple to deploy and recover, but not a replacement for a partitioned streaming system under sustained multi-node load.
+- The client benchmark includes JSON and HTTP time; server timing stages only cover work after request parsing.
 
-## Burst handling and performance tradeoffs
+## Security and production boundaries
 
-The API allows *a single request with up to 10,000 readings*. Input is validated before writes, checked against registered active sensors in one query, deduplicated using unique event IDs, and inserted in batches of 1000. Alert processing is not on the HTTP request path. This allows independent measurement and tuning of ingest rate and alert-processing lag.
-
-Do not equate accepting a 10k payload with achieving 10k **sustained** insertions per second. The load-test reports client wall time, network effects and server persistence. An actual benchmark needs a local/remote HTTP client, real MySQL, hardware/environment description, DB instrumentation, repeated trials and background worker metrics. V1 uses Django bulk insert + MySQL indexes rather than Kafka/Redis or distributed sharding.
-
-## Rolling-window definition
-
-For each `(sensor, metric, rule)` maintain a deque with readings in `[current_time - window_seconds, current_time]`. On each new reading, add it, evict values older than the window, and compute `sum / count` with Decimal arithmetic. `min_samples` prevents alerts from one weak reading. Grouping rules by metric avoids evaluating irrelevant rules.
-
-The earliest pending reading in the worker chunk loads matching *already processed* historical measurements once per `(sensor, metric, rule)` state. Batch records are processed in recorded timestamp order. An alert is created once per `(rule,sensor, UTC-aligned time bucket)`, not once per qualifying sample. **Late out-of-order measurements across worker batches may cause different averages than a globally sorted replay**; watermarks/recompute support is an explicitly deferred V2 improvement. The worker should run as one instance in V1 for consistency of time windows. New rules apply only to readings still queued.
-
-## Security
-
-- Sensor writes require configured strong `X-Sensor-Key` or a staff token.
-- Staff login uses Django password hashing, account state and DRF auth tokens.
-- Default endpoints require token; public endpoints are only health and login.
-- Django serializers validate types, size, timestamp and numeric precision.
-- Keep `.env` private, disable DEBUG outside local testing, use HTTPS, narrow allowed hosts.
-- To revoke a token: delete/recreate the user's DRF token. Shared sensor key is V1; per-sensor API keys can come in V2.
-- The SQL bootstrap grants runtime account DDL and ROUTINE privileges for one-time setup; production should use distinct DB migrator and restricted runtime credentials.
-
-## Recovery
-
-The DB is the queue. An API restart does not lose already committed readings; the worker restarts and resumes from `processed_at IS NULL`. Transactional row selection and alert dedupe avoid double effects. Failed entire batches remain pending because the worker transaction rolls back. Long-running poison inputs need a dead-letter table/retry counter in V2.
+Protect `.env`, database credentials, organizer tokens and sensor keys. Use HTTPS in any remotely accessible installation, tighten `ALLOWED_HOSTS`, disable Django DEBUG, add input rate limiting/observability/backups, and use a WSGI/ASGI application server rather than exposing Django `runserver`. These are development/research demonstrators, not audited production services.

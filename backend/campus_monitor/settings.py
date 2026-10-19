@@ -62,3 +62,8 @@ REST_FRAMEWORK = {
     "PAGE_SIZE": 50,
 }
 SENSOR_API_KEY = os.environ.get("SENSOR_API_KEY", "")
+
+# Configurable V2 ingest engine. `legacy` restores V1 behavior without migrations.
+CAMPUS_INGEST_MODE = os.environ.get("CAMPUS_INGEST_MODE", "fast").strip().lower()
+if CAMPUS_INGEST_MODE not in ("fast", "legacy"):
+    raise ValueError("CAMPUS_INGEST_MODE must be fast or legacy")

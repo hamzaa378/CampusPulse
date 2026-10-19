@@ -1,6 +1,6 @@
 # REST API contract
 
-Base: `http://127.0.0.1:8000/api`.
+Base: `http://127.0.0.1:8010/api` (V2 recommended development port).
 
 Authentication: organizer API uses `Authorization: Token <token>`. Sensor ingestion uses `X-Sensor-Key: <secret>` (>=16 characters) or staff token. Organizer accounts must have `is_staff=True`. Unknown and inactive sensors are rejected for ingestion. Both ingest routes return `202 Accepted` after MySQL persistence, not after rule evaluation.
 
@@ -33,10 +33,10 @@ Authentication: organizer API uses `Authorization: Token <token>`. Sensor ingest
 Batch response sample:
 
 ```json
-{"received":1,"unique_in_request":1,"already_present":0,"new_candidates":1,"status":"durably_queued","note":"Rules are evaluated by the alert worker."}
+{"received":1,"unique_in_request":1,"already_present":0,"new_candidates":1,"status":"durably_queued","engine":"mysql_native_bulk","timings_ms":{"validation":0.2,"lookup":1.1,"prepare":0.1,"insert_commit":1.8,"total":3.2},"note":"Rules are evaluated asynchronously by the alert worker."}
 ```
 
-The `new_candidates` number is not a concurrency-safe exact inserted row count because the DB may discard conflicting IDs during concurrent writes. A `202` means the server completed the DB insert transaction.
+Timing numbers in the example are illustrative, NOT real benchmarks. On V2, `CAMPUS_INGEST_MODE=legacy` removes `timings_ms`; use the real benchmark output for speed claims. The `new_candidates` number is not a concurrency-safe exact inserted row count because the DB may discard conflicting IDs during concurrent writes. A `202` means the server completed the DB insert transaction.
 
 ## Rule creation example
 

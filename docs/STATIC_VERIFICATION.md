@@ -1,26 +1,14 @@
-# V1 release verification
+# V2 source-verification report
 
-## Checked during package generation
+## Checks performed in packaging environment
 
-- Python AST/syntax check of all 28 Python source files: **PASS**.
-- Schema completeness check: **PASS** for all six application tables.
-- SQL object declaration check: **PASS** for 4 triggers, 4 procedures, 2 functions, 4 views, 1 cursor.
-- Django model-to-initial-migration field-name alignment: **PASS** for six model classes.
-- README, environment example, frontend source, worker, API tests, static preflight, handover: present.
+- `python -m compileall -q backend frontend scripts`: **PASS**.
+- `python scripts/static_check.py`: **PASS**. It validates six table declarations, four triggers, four procedures, two functions, four views and one cursor declaration.
+- Additional isolated pure-Python validation harness (with API-compatible stubs, NOT actual Django/DRF integration): **10,000 synthetic records normalized**, invalid decimal precision, excessive whole digits, non-finite values and bool rejected.
+- V2 source and schema are separate from V1; no database migrations added.
 
-Re-run syntax + declaration checks from the project root:
+## Important limitations
 
-```powershell
-python scripts/static_check.py
-python -m compileall -q backend frontend scripts
-```
+This workspace has no Django, DRF, Streamlit or running MySQL server. Therefore it **cannot** verify the new native MySQL upsert, actual API throughput, Windows Waitress deployment, browser flows or SQLite/Django test suite. User should run `python manage.py test monitor.tests -v 2` and local MySQL tests in the instructions before claiming any V2 runtime feature passes.
 
-## Not verified yet (must test on Windows + MySQL)
-
-- Installing Django/DRF/Streamlit dependencies and starting their processes.
-- Django's `manage.py check`, migration check and test suite.
-- Executing MySQL DDL, triggers, stored procedures, cursor routine and views.
-- Real network requests and Streamlit user interactions.
-- MySQL 10k-ingest burst and worker-drain times.
-
-The generation environment cannot install Python packages over the network and has no MySQL server. These are deployment-gate checks, not assumed successes. Next step is `python manage.py migrate`, followed by the MySQL routine import and `python manage.py test`, as described in `README.md`.
+V1 real-world verification is recorded separately in `docs/V1_MEASURED_BASELINE.json`. No V2 live results have been produced here.

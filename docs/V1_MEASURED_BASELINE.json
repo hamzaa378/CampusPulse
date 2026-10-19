@@ -1,0 +1,28 @@
+{
+  "project": "GDG CampusPulse",
+  "version": "V1",
+  "source": "User-provided local Windows PowerShell and MySQL output, 2026-10-19",
+  "environment": "Django 5.2.17 development server, MySQL 8.0.45, Windows, host 127.0.0.1:8010",
+  "warmup": {
+    "count": 100,
+    "http_status": 202,
+    "client_wall_seconds": 0.043071,
+    "client_observed_readings_per_second": 2321.75
+  },
+  "main_batch": {
+    "count": 10000,
+    "http_status": 202,
+    "client_wall_seconds": 1.405263,
+    "client_observed_readings_per_second": 7116.11,
+    "payload_bytes": 1575014,
+    "response_status": "durably_queued"
+  },
+  "database_after_warmup_and_burst": {
+    "total_readings": 10110,
+    "processed": 10110,
+    "pending": 0,
+    "instant_rule_alerts": 4946,
+    "window_rule_alerts": 1
+  },
+  "interpretation": "10k records persisted and processed; single-request 1-second goal NOT met (1.405263 s). V2 outcome unmeasured."
+}

@@ -56,7 +56,8 @@ def main():
         point = {"run":run+1, "readings_sent":args.count,"http_status":response.status_code,
                  "client_wall_seconds":round(elapsed,6),
                  "client_observed_readings_per_second":round(args.count/max(elapsed,1e-9),2),
-                 "payload_bytes":payload_bytes,"response":body}
+                 "payload_bytes":payload_bytes,"engine":body.get("engine"),
+                 "server_timings_ms":body.get("timings_ms"),"response":body}
         results.append(point)
         print(json.dumps(point, indent=2))
     times = [r["client_wall_seconds"] for r in results]

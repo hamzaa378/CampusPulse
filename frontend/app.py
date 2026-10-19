@@ -66,7 +66,7 @@ with st.sidebar:
             st.session_state.token = None
             st.session_state.username = None
             st.rerun()
-    page = st.radio("Workspace", ["Overview", "Sensors", "Alert rules", "Alerts", "Sensor simulator", "API status"],
+    page = st.radio("Workspace", ["Overview", "Sensors", "Alert rules", "Alerts", "Sensor simulator", "Performance lab", "API status"],
                     label_visibility="collapsed")
     st.divider()
     with st.expander("Sensor ingest key", expanded=False):
@@ -251,6 +251,7 @@ elif page == "Sensor simulator":
                 if result:
                     st.success(f"Server accepted request in {elapsed:.3f}s (client wall time).")
                     st.json(result)
+                    st.session_state.last_ingest_diagnostics = result
                     st.metric("Observed client requests/sec", f"{int(count)/max(elapsed,0.0001):,.1f}")
                     st.caption("This is a single-batch measurement, not a verified sustained-throughput claim.")
         if st.button("Process queued readings now (up to 500)"):
@@ -258,6 +259,68 @@ elif page == "Sensor simulator":
             if result:
                 st.json(result)
         st.warning("For automatic background processing, run `python manage.py run_alert_worker` in a separate terminal.")
+
+elif page == "Performance lab":
+    st.title("Ingestion performance lab")
+    st.caption("Live MySQL-backed counters + measured benchmark reports. This page does not fabricate speed claims.")
+    dashboard = call("GET", "dashboard/")
+    if dashboard:
+        a, b, c, d = st.columns(4)
+        a.metric("Total readings", f"{dashboard.get('total_readings', 0):,}")
+        b.metric("Pending queue", f"{dashboard.get('pending_readings', 0):,}")
+        c.metric("Active sensors", dashboard.get("active_sensors", 0))
+        d.metric("Enabled rules", dashboard.get("enabled_rules", 0))
+    st.subheader("Last ingestion: server-stage timings")
+    diagnostic = st.session_state.get("last_ingest_diagnostics")
+    if diagnostic and diagnostic.get("timings_ms"):
+        st.caption(f"Backend path: {diagnostic.get('engine', 'unknown')}")
+        stages = diagnostic["timings_ms"]
+        df = pd.DataFrame([{"stage": key, "duration_ms": value} for key, value in stages.items() if key != "total"])
+        st.bar_chart(df.set_index("stage"))
+        st.metric("Server-ingest elapsed", f"{stages.get('total', 0):.2f} ms")
+    else:
+        st.info("Submit a batch from Sensor simulator to view server stage timings for that request.")
+
+    st.subheader("Compare actual V1 and V2 results")
+    st.caption("The baseline below is the measured 19 Oct 2026 V1 run on your machine, not an estimate.")
+    baseline_path = Path(__file__).resolve().parents[1] / "docs" / "V1_MEASURED_BASELINE.json"
+    baseline = None
+    try:
+        import json
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        st.warning("Bundled V1 baseline unavailable")
+    measured_v1 = baseline["main_batch"]["client_wall_seconds"] if baseline else None
+    uploaded = st.file_uploader("Upload your newly measured results/v2_10k.json", type="json")
+    if measured_v1 is not None:
+        st.metric("V1 10,000-reading client time", f"{measured_v1:.3f} s")
+    if uploaded is not None:
+        try:
+            import json
+            from statistics import median
+            data = json.loads(uploaded.getvalue())
+            runs = data["runs"]
+            if not runs or any(run["readings_sent"] != 10000 for run in runs):
+                st.error("Upload a benchmark containing only 10,000-reading single-request runs.")
+            else:
+                durations = [float(run["client_wall_seconds"]) for run in runs]
+                med = median(durations)
+                a, b, c = st.columns(3)
+                a.metric("V2 median client time", f"{med:.3f} s", delta=f"{(measured_v1-med)/measured_v1*100:.1f}% faster" if measured_v1 else None)
+                b.metric("V2 observed throughput", f"{10000/med:,.0f}/s")
+                c.metric("1 second target", "PASS" if all(t <= 1.0 for t in durations) else "NOT MET")
+                if measured_v1 is not None:
+                    st.bar_chart(pd.DataFrame({"seconds": [measured_v1, med]}, index=["V1", "V2 median"]))
+                detailed = [{"run": r["run"], "client_seconds": r["client_wall_seconds"],
+                             "engine": r.get("engine", "not reported"),
+                             "server_total_ms": (r.get("server_timings_ms") or {}).get("total")} for r in runs]
+                st.dataframe(pd.DataFrame(detailed), use_container_width=True, hide_index=True)
+        except (KeyError, ValueError, TypeError, ZeroDivisionError) as exc:
+            st.error(f"Invalid measured benchmark file: {exc}")
+    st.subheader("Reproduce the benchmark")
+    st.code("python scripts/load_test.py --base-url http://127.0.0.1:8010/api --count 10000 --repeat 3 --output results/v2_10k.json", language="powershell")
+    st.code("python scripts/compare_benchmarks.py --before docs/V1_MEASURED_BASELINE.json --after results/v2_10k.json", language="powershell")
+    st.caption("Client time includes network/JSON overhead. Worker queue drainage is verified separately, not inferred from HTTP 202.")
 
 elif page == "API status":
     st.title("Backend status & testing")
